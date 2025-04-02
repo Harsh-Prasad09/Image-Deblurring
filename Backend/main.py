@@ -53,7 +53,7 @@ class ConvAutoencoder(nn.Module):
 
 # Load the PyTorch model
 general_model = ConvAutoencoder()
-general_model.load_state_dict(torch.load('TextModelWeights.pth', map_location=torch.device('cpu')))
+general_model.load_state_dict(torch.load('Backend\TextModelWeights.pth', map_location=torch.device('cpu')))
 general_model.eval()
 
 # Define the transformation for the input image
@@ -86,7 +86,7 @@ def generator_model():
     return model
 
 # Load the TensorFlow model
-text_model_weights = "GeneralModelWeights.h5"
+text_model_weights = "Backend\GeneralModelWeights.h5"
 text_model = generator_model()
 text_model.load_weights(text_model_weights)
 
