@@ -86,7 +86,7 @@ def generator_model():
     return model
 
 # Load the TensorFlow model
-text_model_weights = "Backend\General.h5"
+text_model_weights = "Backend\General.weights.h5"
 text_model = generator_model()
 text_model.load_weights(text_model_weights)
 
