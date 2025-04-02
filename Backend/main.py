@@ -9,6 +9,7 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model, Model
 from tensorflow.keras.layers import Input, Conv2D, Conv2DTranspose, LeakyReLU, BatchNormalization, Activation
 import numpy as np
+from waitress import serve
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -150,4 +151,5 @@ def predict_text():
 
 # -------------------- Run the Flask App --------------------
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # app.run(host="0.0.0.0", port=5000, debug=True)
+    serve(app, '0.0.0.0', port = 5000)
