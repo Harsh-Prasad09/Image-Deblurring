@@ -57,9 +57,9 @@ const ImageDeblurring = () => {
   
       // Determine the endpoint based on the active tab
       if (activeTab === "text") {
-        endpoint = "http://127.0.0.1:5000/predict/text";
+        endpoint = "https://console.cloud.google.com/cloud-build/builds;region=global/00b0b70f-aba2-4ed4-b172-7092a4ba4a4b?hl=en&invt=AbtvUg&project=orbital-bank-455617-v6&supportedpurview=folder/predict/text";
       } else if (activeTab === "general") {
-        endpoint = "http://127.0.0.1:5000/predict/general";
+        endpoint = "https://console.cloud.google.com/cloud-build/builds;region=global/00b0b70f-aba2-4ed4-b172-7092a4ba4a4b?hl=en&invt=AbtvUg&project=orbital-bank-455617-v6&supportedpurview=folder/predict/general";
       } else {
         throw new Error("Invalid tab selected");
       }
