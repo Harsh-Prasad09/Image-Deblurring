@@ -1,161 +1,155 @@
-import os
-import io
-import tempfile
-import logging
-from typing import Optional
-
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-import requests
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+import torch
+from torch import nn
 from PIL import Image
+import io
+import torchvision.transforms as transforms
+import tensorflow as tf
+from tensorflow.keras.models import load_model, Model
+from tensorflow.keras.layers import Input, Conv2D, Conv2DTranspose, LeakyReLU, BatchNormalization, Activation
 import numpy as np
-import cv2
+from waitress import serve
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)  # Enable CORS for cross-origin requests
 
-app = FastAPI(title='Image Deblurring Backend')
+# -------------------- PyTorch Model for General Section --------------------
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=['*'],
-    allow_methods=['*'],
-    allow_headers=['*'],
-)
+# Define the Convolutional Autoencoder
+class ConvAutoencoder(nn.Module):
+    def __init__(self):
+        super(ConvAutoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(512, 1024, kernel_size=3, stride=2, padding=1),
+            nn.ReLU()
+        )
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(1024, 512, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 3, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.Sigmoid()
+        )
 
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
 
-def call_hf_inference(model: str, token: str, image_bytes: bytes, timeout: int = 120) -> bytes:
-    """
-    Send raw image bytes to the Hugging Face Inference API for an image-to-image model.
-    Returns raw bytes of response (expected image) or raises HTTPException on error.
-    """
-    url = f'https://api-inference.huggingface.co/models/{model}'
-    headers = {'Authorization': f'Bearer {token}'}
-    logger.info('Calling HF model %s', model)
-    try:
-        resp = requests.post(url, headers=headers, data=image_bytes, timeout=timeout)
-    except requests.RequestException as e:
-        logger.exception('HF request failed')
-        raise HTTPException(status_code=502, detail=f'Hugging Face request failed: {e}')
+# Load the PyTorch model
+general_model = ConvAutoencoder()
+general_model.load_state_dict(torch.load('GeneralModelWeights.pth', map_location=torch.device('cpu')))
+general_model.eval()
 
-    if resp.status_code != 200:
-        # HF returns JSON error messages sometimes
-        try:
-            err = resp.json()
-        except Exception:
-            err = resp.text
-        logger.error('HF model error: %s', err)
-        raise HTTPException(status_code=502, detail={'status_code': resp.status_code, 'error': err})
+# Define the transformation for the input image
+general_transform = transforms.Compose([
+    transforms.Resize((128, 128)),
+    transforms.ToTensor(),
+])
 
-    return resp.content
+# -------------------- TensorFlow Model for Text Section --------------------
 
+# Define the TensorFlow generator model
+def generator_model():
+    inputs = Input(shape=(256, 256, 3))
+    x = Conv2D(64, kernel_size=4, strides=2, padding='same')(inputs)
+    x = LeakyReLU(alpha=0.2)(x)
+    x = Conv2D(128, kernel_size=4, strides=2, padding='same')(x)
+    x = BatchNormalization()(x)
+    x = LeakyReLU(alpha=0.2)(x)
+    x = Conv2D(256, kernel_size=4, strides=2, padding='same')(x)
+    x = BatchNormalization()(x)
+    x = LeakyReLU(alpha=0.2)(x)
+    x = Conv2DTranspose(128, kernel_size=4, strides=2, padding='same')(x)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    x = Conv2DTranspose(64, kernel_size=4, strides=2, padding='same')(x)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    outputs = Conv2DTranspose(3, kernel_size=4, strides=2, padding='same', activation='tanh')(x)
+    model = Model(inputs, outputs)
+    return model
 
-def motion_psf(length: int = 15, angle: float = 0) -> np.ndarray:
-    # create a simple linear motion blur PSF
-    EPS = 1e-8
-    size = length
-    psf = np.zeros((size, size), dtype=np.float32)
-    center = size // 2
-    angle_rad = np.deg2rad(angle)
-    cos_a = np.cos(angle_rad)
-    sin_a = np.sin(angle_rad)
-    for i in range(size):
-        x = center + (i - center) * cos_a
-        y = center + (i - center) * sin_a
-        ix = int(round(x))
-        iy = int(round(y))
-        if 0 <= ix < size and 0 <= iy < size:
-            psf[iy, ix] = 1
-    s = psf.sum()
-    if s < EPS:
-        psf[center, center] = 1.0
-        s = 1.0
-    return psf / s
+# Load the TensorFlow model
+text_model_weights = "TextModelWeights.weights.h5"
+text_model = generator_model()
+text_model.load_weights(text_model_weights)
 
+# -------------------- API Endpoints --------------------
 
-def richardson_lucy(img: np.ndarray, psf: np.ndarray, iterations: int = 30) -> np.ndarray:
-    # Expect img float64 in range [0,1] or [0,255]; normalize inside
-    if img.dtype != np.float64:
-        img = img.astype(np.float64)
-    # normalize to [0,1]
-    maxv = img.max() if img.max() > 1 else 1.0
-    img = img / maxv
+# Endpoint for general section (PyTorch model)
+@app.route('/predict/general', methods=['POST'])
+def predict_general():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
 
-    # pad PSF to image size by center placement
-    estimate = np.full(img.shape, 0.5)
-    psf_flip = psf[::-1, ::-1]
-    # operate per channel
-    if img.ndim == 2:
-        channels = 1
-        img_ch = [img]
-    else:
-        channels = img.shape[2]
-        img_ch = [img[:, :, c] for c in range(channels)]
+    file = request.files['image']
+    image = Image.open(file).convert('RGB')
 
-    out_ch = []
-    for ch in img_ch:
-        # init estimate as the input
-        est = ch.copy()
-        for i in range(iterations):
-            conv = cv2.filter2D(est, -1, psf, borderType=cv2.BORDER_REPLICATE)
-            relative_blur = ch / (conv + 1e-6)
-            est = est * cv2.filter2D(relative_blur, -1, psf_flip, borderType=cv2.BORDER_REPLICATE)
-        out_ch.append(est)
+    # Preprocess the image
+    input_image = general_transform(image).unsqueeze(0)
 
-    if channels == 1:
-        result = out_ch[0]
-    else:
-        result = np.stack(out_ch, axis=2)
+    # Pass the image through the model
+    with torch.no_grad():
+        reconstructed_image = general_model(input_image)
 
-    result = np.clip(result * maxv, 0, 255).astype(np.uint8)
-    return result
+    # Convert the reconstructed image to a PIL image
+    reconstructed_image = reconstructed_image.squeeze(0).permute(1, 2, 0).numpy()
+    reconstructed_image = (reconstructed_image * 255).clip(0, 255).astype('uint8')
+    reconstructed_image = Image.fromarray(reconstructed_image)
 
+    # Save the reconstructed image to a BytesIO object
+    img_io = io.BytesIO()
+    reconstructed_image.save(img_io, 'JPEG')
+    img_io.seek(0)
 
-def local_deblur(pil_img: Image.Image) -> bytes:
-    # Convert to OpenCV BGR
-    img = np.array(pil_img.convert('RGB'))
-    img_cv = img[:, :, ::-1]
-    # estimate a motion PSF; parameters could be tuned or exposed
-    psf = motion_psf(length=21, angle=0)
-    # run RL deconvolution per channel
-    result = richardson_lucy(img_cv, psf, iterations=25)
-    # convert back to RGB PIL bytes
-    result_rgb = result[:, :, ::-1]
-    out_pil = Image.fromarray(result_rgb)
-    buf = io.BytesIO()
-    out_pil.save(buf, format='PNG')
-    return buf.getvalue()
+    return send_file(img_io, mimetype='image/jpeg')
 
+# Endpoint for text section (TensorFlow model)
+@app.route('/predict/text', methods=['POST'])
+def predict_text():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
 
-@app.post('/deblur')
-async def deblur_image(file: UploadFile = File(...)):
-    contents = await file.read()
-    # if HF env vars are present, call the HF inference API using those credentials
-    hf_model = os.getenv('HF_MODEL')
-    hf_token = os.getenv('HF_TOKEN')
+    file = request.files['image']
+    image = Image.open(file).convert('RGB')
 
-    if hf_model and hf_token:
-        try:
-            out_bytes = call_hf_inference(hf_model, hf_token, contents)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception('HF inference failed')
-            raise HTTPException(status_code=500, detail=str(e))
-        return StreamingResponse(io.BytesIO(out_bytes), media_type='image/png')
+    # Preprocess the image
+    img = image.resize((256, 256))
+    img_array = np.array(img) / 127.5 - 1.0
+    preprocessed_image = np.expand_dims(img_array, axis=0)
 
-    # fallback: local algorithm
-    try:
-        pil_img = Image.open(io.BytesIO(contents)).convert('RGB')
-    except Exception as e:
-        logger.exception('Invalid image uploaded')
-        raise HTTPException(status_code=400, detail='Invalid image')
+    # Pass the image through the model
+    output_array = text_model.predict(preprocessed_image)
 
-    out_bytes = local_deblur(pil_img)
-    return StreamingResponse(io.BytesIO(out_bytes), media_type='image/png')
+    # Postprocess the output image
+    output_array = (output_array + 1.0) * 127.5
+    output_array = np.clip(output_array, 0, 255).astype(np.uint8)
+    output_image = Image.fromarray(output_array[0])
 
+    # Save the output image to a BytesIO object
+    img_io = io.BytesIO()
+    output_image.save(img_io, 'JPEG')
+    img_io.seek(0)
 
+    return send_file(img_io, mimetype='image/jpeg')
+
+# -------------------- Run the Flask App --------------------
 if __name__ == '__main__':
-    import uvicorn
-    uvicorn.run('Backend.main:app', host='0.0.0.0', port=int(os.getenv('PORT', 8000)), reload=False)
+    # app.run(host="0.0.0.0", port=5000, debug=True)
+    serve(app, host='0.0.0.0', port=8080)
